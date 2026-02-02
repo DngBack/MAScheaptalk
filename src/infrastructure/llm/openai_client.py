@@ -39,14 +39,53 @@ class OpenAIClient(LLMClient):
         
         self.client = openai.OpenAI(api_key=openai.api_key)
     
-    def generate(
+    async def generate(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        **kwargs
+    ) -> str:
+        """
+        Generate a response using OpenAI API.
+        
+        Args:
+            messages: List of message dicts with 'role' and 'content'
+            temperature: Sampling temperature
+            max_tokens: Max tokens to generate
+            
+        Returns:
+            Generated text content
+        """
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                **kwargs
+            )
+            
+            # Return just the content string (for compatibility with baselines)
+            return response.choices[0].message.content
+        
+        except Exception as e:
+            print(f"Error calling OpenAI API: {e}")
+            raise
+    
+    def generate_with_usage(
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         **kwargs
     ) -> Dict[str, Any]:
-        """Generate a response using OpenAI API."""
+        """
+        Generate a response with usage information.
+        
+        Returns:
+            Dict with 'content', 'usage', and 'model'
+        """
         try:
             response = self.client.chat.completions.create(
                 model=self.model,

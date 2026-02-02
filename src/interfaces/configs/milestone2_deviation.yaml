@@ -1,0 +1,30 @@
+experiment:
+  name: "deviation_suite"
+  num_tasks: 100
+  seeds: [42, 43, 44]
+
+protocol:
+  protocol_id: "p1_evidence_first"
+
+deviation_types:
+  - honest
+  - no_evidence
+  - lie
+  - withhold
+  - persuasion_only
+  - low_effort
+
+payoff_config:
+  lambda_cost: 0.01      # Cost weight (λ)
+  mu_penalty: 0.5        # Penalty weight (μ)
+  token_cost_per_1k: 0.0001
+  tool_call_cost: 0.01
+
+dataset:
+  name: "fever"
+  split: "validation"
+  
+output:
+  results_dir: "results/milestone2"
+  save_episodes: true
+  save_summary: true

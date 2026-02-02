@@ -17,16 +17,24 @@ from domain.value_objects.labels import FEVERLabel
 class HFFEVERRepository(DatasetRepository):
     """FEVER dataset repository using HuggingFace datasets library."""
     
-    def __init__(self, split: str = "validation", num_samples: int = 100, seed: int = 42):
+    def __init__(self, split: str = "train", num_samples: int = 100, seed: int = 42):
         """
         Initialize FEVER repository.
         
         Args:
-            split: Dataset split ('train', 'validation', 'test')
+            split: Dataset split ('train', 'dev', 'test')
             num_samples: Number of samples to load
             seed: Random seed for reproducibility
         """
-        self.split = split
+        # Map common names to actual split names
+        split_map = {
+            "validation": "dev",
+            "val": "dev",
+            "train": "train",
+            "test": "test",
+            "dev": "dev"
+        }
+        self.split = split_map.get(split.lower(), split)
         self.num_samples = num_samples
         self.seed = seed
         
@@ -97,9 +105,11 @@ class HFFEVERRepository(DatasetRepository):
         
         task_id = str(item.get("id", f"fever_{idx}"))
         claim = item.get("claim", "")
-        label_str = item.get("label", "NOT ENOUGH INFO")
+        raw_label = item.get("label", "NOT ENOUGH INFO")
+        # HF FEVER may use int: 0=SUPPORTS, 1=REFUTES, 2=NOT ENOUGH INFO
+        label_str = raw_label if isinstance(raw_label, (str, int)) else "NOT ENOUGH INFO"
         
-        # Parse label
+        # Parse label (from_string accepts str or int)
         try:
             label = FEVERLabel.from_string(label_str)
         except ValueError:

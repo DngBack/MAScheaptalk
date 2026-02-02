@@ -14,6 +14,7 @@ if str(src_path) not in sys.path:
     sys.path.insert(0, str(src_path))
 
 from domain.entities.message import Message
+from domain.entities.evidence import Evidence
 from domain.entities.task import Task
 from domain.value_objects.role import AgentRole
 from application.protocols.base_protocol import BaseProtocol
@@ -93,10 +94,12 @@ Provide your assessment following the protocol format."""
             cancellation_token=None
         )
         
+        # Parse evidence from Sender content so verifier can use message.evidence
+        sender_evidence = self._parse_evidence_from_content(sender_response.chat_message.content)
         sender_message = Message(
             role=AgentRole.SENDER,
             content=sender_response.chat_message.content,
-            evidence=[],
+            evidence=sender_evidence,
             timestamp=datetime.now(),
             metadata={}
         )
@@ -137,3 +140,31 @@ Please evaluate this according to the protocol and make your decision."""
         }
         
         return transcript, usage_info
+    
+    def _parse_evidence_from_content(self, content: str) -> List[Evidence]:
+        """Extract evidence blocks from Sender response and attach as Evidence objects."""
+        import re
+        evidence_list: List[Evidence] = []
+        if not content or not content.strip():
+            return evidence_list
+        # Evidence: ... (multiline until Confidence/Reasoning/next section)
+        section = re.search(
+            r"\bEvidence\s*:\s*(.+?)(?=\s*(?:Confidence|Reasoning|Decision|Final|Assessment|$))",
+            content,
+            re.IGNORECASE | re.DOTALL
+        )
+        if section:
+            raw = section.group(1).strip()
+            for i, part in enumerate(re.split(r"\n\s*(?:\d+[.)]\s*|[-*]\s*)", raw)):
+                part = part.strip()
+                if len(part) > 15:
+                    evidence_list.append(Evidence(evidence_id=f"parsed_{i}", text=part, source=None, metadata={}))
+            if not evidence_list and len(raw) > 15:
+                evidence_list.append(Evidence(evidence_id="parsed_0", text=raw, source=None, metadata={}))
+        # Single-line Evidence: ...
+        if not evidence_list:
+            for m in re.finditer(r"Evidence\s*:\s*(.+?)(?=\n|$)", content, re.IGNORECASE | re.MULTILINE):
+                b = m.group(1).strip()
+                if len(b) > 15:
+                    evidence_list.append(Evidence(evidence_id=f"parsed_{len(evidence_list)}", text=b, source=None, metadata={}))
+        return evidence_list

@@ -9,7 +9,7 @@ src_path = Path(__file__).parent / "src"
 sys.path.insert(0, str(src_path))
 
 from infrastructure.datasets.hf_fever_repo import HFFEVERRepository
-from infrastructure.verifiers.fever_groundtruth_verifier import FEVERGroundTruthVerifier
+from infrastructure.verifiers.verifier_factory import create_fever_verifier
 from infrastructure.storage.jsonl_storage import JSONLStorage
 from infrastructure.llm.openai_client import OpenAIClient
 from domain.entities.payoff import PayoffConfig
@@ -20,11 +20,26 @@ from application.use_cases.run_episode import RunEpisode
 from application.use_cases.run_baseline_comparison import RunBaselineComparison
 
 
+def _get_submission_config():
+    """Read task/sample/seed from env for submission runs. Default: 500 tasks, seed 42."""
+    def _int_env(name: str, default: int) -> int:
+        v = os.getenv(name)
+        if v is None or v.strip() == "":
+            return default
+        try:
+            return max(1, int(v.strip()))
+        except ValueError:
+            return default
+    return _int_env("NUM_TASKS", 500), _int_env("NUM_SAMPLES", 500), _int_env("SEED", 42)
+
+
 def main():
     """Run Milestone 3: Baseline Comparison."""
     
     # Load environment
     load_dotenv()
+    
+    num_tasks, num_samples, seed = _get_submission_config()
     
     print("="*80)
     print("MILESTONE 3: BASELINE COMPARISON")
@@ -33,7 +48,9 @@ def main():
     print("  1. Self-Consistency (K=5 samples, voting)")
     print("  2. Self-Refine (2 rounds of critique-revise)")
     print("\nConfiguration:")
-    print("  - Tasks: 10 (test run)")
+    print(f"  - Tasks: {num_tasks} (set NUM_TASKS in .env for submission)")
+    print(f"  - Samples: {num_samples} (set NUM_SAMPLES in .env)")
+    print(f"  - Seed: {seed} (set SEED in .env)")
     print("  - Model: gpt-4o-mini (cost-effective)")
     print("  - Budget: 2000 tokens, 10 calls per task")
     print("  - Fair comparison: same LLM, same budget")
@@ -52,8 +69,8 @@ def main():
     print("\n[1/5] Initializing dataset...")
     dataset_repo = HFFEVERRepository(
         split="dev",  # FEVER uses 'dev' not 'validation'
-        num_samples=10,
-        seed=42
+        num_samples=num_samples,
+        seed=seed
     )
     
     print("[2/5] Initializing LLM client...")
@@ -79,9 +96,14 @@ def main():
     
     baselines = [self_consistency, self_refine]
     
-    print("[5/5] Initializing protocol (for comparison)...")
+    print("[5/5] Initializing protocol and verifier (evidence: string match + optional LLM eval)...")
     protocol = P1EvidenceFirstProtocol()
-    verifier = FEVERGroundTruthVerifier(use_semantic_matching=False)
+    verifier = create_fever_verifier(
+        use_semantic_matching=False,
+        use_llm_evidence_eval=None,
+        llm_model="gpt-4o-mini",
+        api_key=api_key,
+    )
     
     run_episode = RunEpisode(
         protocol=protocol,
@@ -100,7 +122,7 @@ def main():
         dataset_repo=dataset_repo,
         storage=storage,
         llm_client=llm_client,
-        num_tasks=10,
+        num_tasks=num_tasks,
         max_tokens_per_task=2000,
         max_calls_per_task=10,
         payoff_config=payoff_config
@@ -135,11 +157,14 @@ def main():
         print(f"\n  Best Accuracy: {best_method[0]}")
         print(f"    - {best_method[1]['accuracy']:.1%}")
         
-        # Evidence compliance
+        # Evidence: compliance and match score
         if 'protocol_p1' in methods:
-            p1_evidence = methods['protocol_p1']['evidence_compliance']
-            print(f"\n  Protocol P1 Evidence Compliance: {p1_evidence:.1%}")
-            
+            p1 = methods['protocol_p1']
+            p1_evidence = p1['evidence_compliance']
+            p1_match = p1.get('evidence_match_score', 0)
+            print(f"\n  Protocol P1 Evidence:")
+            print(f"    - Compliance: {p1_evidence:.1%}")
+            print(f"    - Match score (vs GT / LLM): {p1_match:.3f}")
             if p1_evidence > 0.9:
                 print(f"    ✓✓ UNIQUE VALUE: Only method with high evidence!")
         

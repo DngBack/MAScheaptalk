@@ -38,13 +38,12 @@ class HFFEVERRepository(DatasetRepository):
         self.num_samples = num_samples
         self.seed = seed
         
-        # Load dataset - FEVER from HuggingFace
-        # Note: The original 'fever' dataset uses old loading scripts
-        # We'll use 'fever/gold' which is the processed version
+        # Load dataset - FEVER from HuggingFace (split_map: validation→dev for HF compatibility)
         print(f"Loading FEVER dataset: split={split}, num_samples={num_samples}")
         
-        # Load limited number of samples
-        split_str = f"{split}[:{num_samples}]" if num_samples else split
+        # Use mapped split name for load_dataset (e.g. "validation" → "dev")
+        hf_split = self.split
+        split_str = f"{hf_split}[:{num_samples}]" if num_samples else hf_split
         
         # Try multiple FEVER dataset sources
         dataset_sources = [
@@ -135,34 +134,55 @@ class HFFEVERRepository(DatasetRepository):
         )
     
     def _extract_evidence(self, item: dict) -> List[Evidence]:
-        """Extract evidence from FEVER item."""
+        """Extract evidence from FEVER item. Prefer actual sentence text when available."""
         evidence_list = []
         
-        # FEVER evidence structure can vary
-        # Common fields: evidence_annotation_id, evidence_id, evidence_wiki_url, evidence_sentence_id
+        # 1) Try columns that may contain evidence *sentence text* (for evidence_match_score)
+        for col in ("evidence", "evidence_sequence", "retrieved_sentences", "evidence_sentences", "sentences"):
+            raw = item.get(col)
+            if raw is None:
+                continue
+            if isinstance(raw, list):
+                for i, entry in enumerate(raw):
+                    if isinstance(entry, str) and len(entry.strip()) > 10:
+                        evidence_list.append(Evidence(
+                            evidence_id=f"{col}_{i}",
+                            text=entry.strip(),
+                            source=col,
+                            metadata={"index": i}
+                        ))
+                    elif isinstance(entry, dict):
+                        text = entry.get("text") or entry.get("sentence") or entry.get("content")
+                        if isinstance(text, str) and len(text.strip()) > 10:
+                            evidence_list.append(Evidence(
+                                evidence_id=f"{col}_{i}",
+                                text=text.strip(),
+                                source=entry.get("source", col),
+                                metadata={"index": i}
+                            ))
+                if evidence_list:
+                    return evidence_list
+            elif isinstance(raw, str) and len(raw.strip()) > 10:
+                evidence_list.append(Evidence(evidence_id=col, text=raw.strip(), source=col, metadata={}))
+                return evidence_list
         
-        # Try to extract evidence sets
+        # 2) Fallback: evidence_id + evidence_wiki_url (often no sentence text, only IDs/URLs)
         if "evidence_annotation_id" in item and item["evidence_annotation_id"]:
-            # Multiple evidence annotations
             evidence_ids = item.get("evidence_id", [])
             evidence_wiki_urls = item.get("evidence_wiki_url", [])
-            
             if isinstance(evidence_ids, list):
                 for i, eid in enumerate(evidence_ids):
                     if eid is None or eid == "":
                         continue
-                    
                     wiki_url = evidence_wiki_urls[i] if i < len(evidence_wiki_urls) else None
-                    
-                    evidence = Evidence(
+                    evidence_list.append(Evidence(
                         evidence_id=str(eid),
                         text=f"Evidence from {wiki_url}" if wiki_url else "Evidence",
                         source=wiki_url,
                         metadata={"index": i}
-                    )
-                    evidence_list.append(evidence)
+                    ))
         
-        # If no evidence extracted, create a placeholder
+        # 3) No usable evidence: placeholder (verifier will skip match and set evidence_validity_skipped_reason)
         if not evidence_list:
             evidence_list.append(Evidence(
                 evidence_id="none",
@@ -174,33 +194,35 @@ class HFFEVERRepository(DatasetRepository):
         return evidence_list
     
     def _create_mock_dataset(self, num_samples: int) -> list:
-        """Create a mock FEVER dataset for testing when real dataset is unavailable."""
+        """Create a mock FEVER dataset for testing when real dataset is unavailable.
+        Includes real evidence sentence text so evidence_match_score can be tested.
+        """
         print("Creating mock FEVER dataset...")
         
         mock_data = []
         
-        # Sample claims and labels for testing
+        # (claim, label, evidence_sentences) — evidence text matches or supports/refutes claim
         sample_claims = [
-            ("The sun is a star.", "SUPPORTS"),
-            ("Water freezes at 100 degrees Celsius.", "REFUTES"),
-            ("Dragons exist in the real world.", "REFUTES"),
-            ("Python is a programming language.", "SUPPORTS"),
-            ("The Earth is flat.", "REFUTES"),
-            ("Photosynthesis occurs in plants.", "SUPPORTS"),
-            ("Humans can breathe underwater without equipment.", "REFUTES"),
-            ("The moon orbits the Earth.", "SUPPORTS"),
-            ("Gravity pulls objects downward on Earth.", "SUPPORTS"),
-            ("Birds are mammals.", "REFUTES"),
+            ("The sun is a star.", "SUPPORTS", ["The sun is a star.", "The Sun is the star at the center of the Solar System."]),
+            ("Water freezes at 100 degrees Celsius.", "REFUTES", ["Water freezes at 0 degrees Celsius at standard pressure.", "The freezing point of water is 0 °C."]),
+            ("Dragons exist in the real world.", "REFUTES", ["Dragons are mythical creatures with no scientific evidence of existence.", "No real-world evidence supports the existence of dragons."]),
+            ("Python is a programming language.", "SUPPORTS", ["Python is a programming language.", "Python is an interpreted high-level programming language."]),
+            ("The Earth is flat.", "REFUTES", ["The Earth is an oblate spheroid.", "Scientific evidence shows the Earth is roughly spherical."]),
+            ("Photosynthesis occurs in plants.", "SUPPORTS", ["Photosynthesis occurs in plants.", "Plants use sunlight to convert CO2 and water into glucose through photosynthesis."]),
+            ("Humans can breathe underwater without equipment.", "REFUTES", ["Humans cannot breathe underwater without artificial equipment.", "Human lungs are not adapted for extracting oxygen from water."]),
+            ("The moon orbits the Earth.", "SUPPORTS", ["The moon orbits the Earth.", "The Moon is Earth's only natural satellite."]),
+            ("Gravity pulls objects downward on Earth.", "SUPPORTS", ["Gravity pulls objects toward the center of the Earth.", "On Earth, gravity gives weight to physical objects."]),
+            ("Birds are mammals.", "REFUTES", ["Birds are not mammals; they are a separate class of vertebrates.", "Birds are classified as aves, not mammals."]),
         ]
         
         for i in range(num_samples):
-            claim, label = sample_claims[i % len(sample_claims)]
+            claim, label, evidence_sentences = sample_claims[i % len(sample_claims)]
             
-            # Create a mock item matching FEVER structure
             mock_item = {
                 "id": f"mock_{i}",
                 "claim": claim,
                 "label": label,
+                "evidence": evidence_sentences,  # Real text so verifier can compute evidence_match_score
                 "evidence_annotation_id": None,
                 "evidence_id": [],
                 "evidence_wiki_url": [],

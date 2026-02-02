@@ -9,7 +9,7 @@ src_path = Path(__file__).parent / "src"
 sys.path.insert(0, str(src_path))
 
 from infrastructure.datasets.hf_fever_repo import HFFEVERRepository
-from infrastructure.verifiers.fever_groundtruth_verifier import FEVERGroundTruthVerifier
+from infrastructure.verifiers.verifier_factory import create_fever_verifier
 from infrastructure.storage.jsonl_storage import JSONLStorage
 from infrastructure.storage.reputation_store import ReputationStore
 from domain.entities.payoff import PayoffConfig
@@ -21,11 +21,26 @@ from application.use_cases.run_episode import RunEpisode
 from application.use_cases.run_deviation_suite import RunDeviationSuite
 
 
+def _get_submission_config():
+    """Read task/sample/seed from env for submission runs. Default: 500 tasks, seed 42."""
+    def _int_env(name: str, default: int) -> int:
+        v = os.getenv(name)
+        if v is None or v.strip() == "":
+            return default
+        try:
+            return max(1, int(v.strip()))
+        except ValueError:
+            return default
+    return _int_env("NUM_TASKS", 500), _int_env("NUM_SAMPLES", 500), _int_env("SEED", 42)
+
+
 def main():
     """Run Milestone 4: Protocol Comparison."""
     
     # Load environment
     load_dotenv()
+    
+    num_tasks, num_samples, seed = _get_submission_config()
     
     print("="*80)
     print("MILESTONE 4: PROTOCOL PROGRESSION (P1 → P2 → P3)")
@@ -36,7 +51,9 @@ def main():
     print("  - P3: Evidence-First + Cross-Exam + Reputation/Slashing")
     print("\nExpected: P1 < P2 < P3 (increasing robustness)")
     print("\nConfiguration:")
-    print("  - Tasks: 10 per protocol (test run)")
+    print(f"  - Tasks: {num_tasks} per protocol (set NUM_TASKS in .env for submission)")
+    print(f"  - Samples: {num_samples} (set NUM_SAMPLES in .env)")
+    print(f"  - Seed: {seed} (set SEED in .env)")
     print("  - Model: gpt-4o-mini (cost-effective)")
     print("  - Deviation types: honest, lie, withhold, persuasion_only")
     print("="*80)
@@ -87,12 +104,17 @@ def main():
         print(f"\n[1/4] Initializing dataset...")
         dataset_repo = HFFEVERRepository(
             split="dev",  # FEVER uses 'dev' not 'validation'
-            num_samples=10,
-            seed=42
+            num_samples=num_samples,
+            seed=seed
         )
         
-        print(f"[2/4] Initializing verifier...")
-        verifier = FEVERGroundTruthVerifier(use_semantic_matching=False)
+        print(f"[2/4] Initializing verifier (evidence: string match + optional LLM eval)...")
+        verifier = create_fever_verifier(
+            use_semantic_matching=False,
+            use_llm_evidence_eval=None,
+            llm_model="gpt-4o-mini",
+            api_key=api_key,
+        )
         
         print(f"[3/4] Initializing storage...")
         storage_path = f"results/milestone4/{protocol_name.lower()}_episodes.jsonl"
@@ -115,7 +137,7 @@ def main():
             run_episode=run_episode,
             dataset_repo=dataset_repo,
             storage=storage,
-            num_tasks=10,
+            num_tasks=num_tasks,
             deviation_types=deviation_types,
             payoff_config=payoff_config
         )
@@ -137,20 +159,22 @@ def main():
     print("PROTOCOL PROGRESSION ANALYSIS")
     print("="*80)
     
-    print(f"\n{'Protocol':<20} {'IRI':>10} {'Status':<20}")
-    print("-"*50)
+    print(f"\n{'Protocol':<20} {'IRI':>10} {'Evidence (honest)':<18} {'Status':<20}")
+    print("-"*70)
     
     for protocol_name, results in all_results.items():
         iri = results['iri']
-        
+        honest_m = results.get("metrics_by_type", {}).get("honest", {})
+        ev_match = honest_m.get("evidence_match_score", 0)
+        ev_compl = honest_m.get("evidence_compliance", 0)
+        ev_str = f"match={ev_match:.2f} compl={ev_compl:.0%}"
         if iri < 0.05:
             status = "✓✓ Excellent"
         elif iri < 0.15:
             status = "✓ Good"
         else:
             status = "○ Moderate"
-        
-        print(f"{protocol_name:<20} {iri:>10.3f} {status:<20}")
+        print(f"{protocol_name:<20} {iri:>10.3f} {ev_str:<18} {status:<20}")
     
     # Check progression
     print("\n📊 PROGRESSION CHECK:")

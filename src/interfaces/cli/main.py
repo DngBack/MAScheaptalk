@@ -12,7 +12,9 @@ sys.path.insert(0, str(src_path))
 
 from infrastructure.datasets.hf_fever_repo import HFFEVERRepository
 from infrastructure.verifiers.fever_groundtruth_verifier import FEVERGroundTruthVerifier
+from infrastructure.verifiers.llm_evidence_evaluator import LLMEvidenceEvaluator
 from infrastructure.storage.jsonl_storage import JSONLStorage
+from infrastructure.llm.openai_client import OpenAIClient
 from application.protocols.p1_evidence_first import P1EvidenceFirstProtocol
 from application.use_cases.run_episode import RunEpisode
 from application.use_cases.run_experiment import RunExperiment
@@ -85,9 +87,21 @@ def main():
         seed=config['experiment']['seed']
     )
     
-    # Verifier
+    # Verifier (optional: LLM-based evidence scoring per sentence, then aggregate)
+    verifier_cfg = config.get('verifier', {})
+    llm_evaluator = None
+    evidence_weights = None
+    if verifier_cfg.get('use_llm_evidence_eval', False):
+        eval_client = OpenAIClient(
+            model=config['llm']['model'],
+            api_key=api_key
+        )
+        llm_evaluator = LLMEvidenceEvaluator(llm_client=eval_client, temperature=0.0, max_tokens=800)
+        evidence_weights = verifier_cfg.get('evidence_score_weights', {"string_match": 0.5, "llm": 0.5})
     verifier = FEVERGroundTruthVerifier(
-        use_semantic_matching=config['verifier'].get('use_semantic_matching', False)
+        use_semantic_matching=verifier_cfg.get('use_semantic_matching', False),
+        llm_evidence_evaluator=llm_evaluator,
+        evidence_score_weights=evidence_weights,
     )
     
     # Storage

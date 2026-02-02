@@ -27,6 +27,11 @@ payoff:
 
 verifier:
   use_semantic_matching: false  # set to true to use sentence-transformers
+  # Optional: use LLM to score each evidence sentence, then aggregate
+  use_llm_evidence_eval: false
+  evidence_score_weights:    # when use_llm_evidence_eval true: combine string_match + llm
+    string_match: 0.5
+    llm: 0.5
 
 output:
   storage_type: "jsonl"

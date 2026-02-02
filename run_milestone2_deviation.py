@@ -9,12 +9,28 @@ src_path = Path(__file__).parent / "src"
 sys.path.insert(0, str(src_path))
 
 from infrastructure.datasets.hf_fever_repo import HFFEVERRepository
-from infrastructure.verifiers.fever_groundtruth_verifier import FEVERGroundTruthVerifier
+from infrastructure.verifiers.verifier_factory import create_fever_verifier
 from infrastructure.storage.jsonl_storage import JSONLStorage
 from domain.entities.payoff import PayoffConfig
 from application.protocols.p1_evidence_first import P1EvidenceFirstProtocol
 from application.use_cases.run_episode import RunEpisode
 from application.use_cases.run_deviation_suite import RunDeviationSuite
+
+
+def _get_submission_config():
+    """Read task/sample/seed from env for submission runs. Default: 500 tasks, seed 42."""
+    def _int_env(name: str, default: int) -> int:
+        v = os.getenv(name)
+        if v is None or v.strip() == "":
+            return default
+        try:
+            return max(1, int(v.strip()))
+        except ValueError:
+            return default
+    num_tasks = _int_env("NUM_TASKS", 500)
+    num_samples = _int_env("NUM_SAMPLES", 500)
+    seed = _int_env("SEED", 42)
+    return num_tasks, num_samples, seed
 
 
 def main():
@@ -23,13 +39,17 @@ def main():
     # Load environment
     load_dotenv()
     
+    num_tasks, num_samples, seed = _get_submission_config()
+    
     print("="*80)
     print("MILESTONE 2: DEVIATION SUITE")
     print("="*80)
     print("\nThis will test all deviation types and compute Deviation Gain (DG)")
     print("Deviation types: honest, no_evidence, lie, withhold, persuasion_only, low_effort")
     print("\nConfiguration:")
-    print("  - Tasks: 10 (test run)")
+    print(f"  - Tasks: {num_tasks} (set NUM_TASKS in .env for submission)")
+    print(f"  - Samples: {num_samples} (set NUM_SAMPLES in .env)")
+    print(f"  - Seed: {seed} (set SEED in .env for reproducibility)")
     print("  - Model: gpt-4o-mini (cost-effective)")
     print("  - Protocol: P1 Evidence-First")
     print("  - Payoff: λ=0.01, μ=0.5")
@@ -48,12 +68,17 @@ def main():
     print("\n[1/5] Initializing dataset...")
     dataset_repo = HFFEVERRepository(
         split="dev",  # FEVER uses 'dev' not 'validation'
-        num_samples=10,
-        seed=42
+        num_samples=num_samples,
+        seed=seed
     )
     
-    print("[2/5] Initializing verifier...")
-    verifier = FEVERGroundTruthVerifier(use_semantic_matching=False)
+    print("[2/5] Initializing verifier (evidence: string match + optional LLM eval)...")
+    verifier = create_fever_verifier(
+        use_semantic_matching=False,
+        use_llm_evidence_eval=None,  # from env USE_LLM_EVIDENCE_EVAL
+        llm_model="gpt-4o-mini",
+        api_key=api_key,
+    )
     
     print("[3/5] Initializing storage...")
     storage = JSONLStorage(filepath="results/milestone2/episodes.jsonl")
@@ -82,7 +107,7 @@ def main():
         run_episode=run_episode,
         dataset_repo=dataset_repo,
         storage=storage,
-        num_tasks=10,
+        num_tasks=num_tasks,
         deviation_types=None,  # Use all
         payoff_config=payoff_config
     )
@@ -111,7 +136,11 @@ def main():
         print(f"  - Tasks completed: {results['num_tasks']}")
         print(f"  - Deviation types tested: {len(results['deviation_types'])}")
         print(f"  - IRI (Incentive Robustness Index): {results['iri']:.3f}")
-        
+        # Evidence: mean evidence_match_score over honest episodes
+        if results.get("metrics_by_type", {}).get("honest"):
+            honest_m = results["metrics_by_type"]["honest"]
+            print(f"  - Honest evidence_match_score (mean): {honest_m.get('evidence_match_score', 0):.3f}")
+            print(f"  - Honest evidence_compliance: {honest_m.get('evidence_compliance', 0):.1%}")
         if results['iri'] < 0.05:
             print(f"  - ✓✓ Excellent robustness!")
         elif results['iri'] < 0.15:

@@ -91,8 +91,62 @@ src/
 | `USE_LLM_EVIDENCE_EVAL` | No | 0 | Set to `1`, `true`, or `yes` to add LLM-based evidence scoring (per-sentence then aggregate). |
 | `OPENAI_MODEL` | No | gpt-4o-mini | Model name (e.g. gpt-4o-mini, gpt-4o). |
 
-- **Sample** = one row loaded from FEVER (claim + label + evidence).  
-- **Task** = one claim used in the experiment; each task can have multiple episodes (e.g. one per deviation type).
+---
+
+## Tasks, samples, and episodes (detailed)
+
+Understanding these three terms is essential for configuring runs and reading results.
+
+### Sample
+
+- **Sample** = **one row** loaded from the FEVER dataset (HuggingFace).
+- Each row contains: a **claim** (e.g. “The Beatles formed in 1960”), a **label** (SUPPORTED / REFUTED / NOT ENOUGH INFO), and **evidence** (sentences that support or refute the claim).
+- **NUM_SAMPLES** = how many such rows to load from FEVER (e.g. 500). This is the “pool” of data you have.
+
+### Task
+
+- **Task** = **one claim** (and its label + evidence) **used as a single unit of experiment**.
+- In code, a `Task` has: `task_id`, `claim`, `label`, `evidence`, `metadata`. It comes from one FEVER row.
+- **NUM_TASKS** = how many of the loaded samples you actually **run** in the experiment. You should have **NUM_TASKS ≤ NUM_SAMPLES** (typically equal: use all 500 loaded rows as 500 tasks).
+
+So: **one sample becomes one task** when we use it in the run. “Task” emphasizes “one claim we evaluate”; “sample” emphasizes “one row we loaded from the dataset.”
+
+### Episode
+
+- **Episode** = **one simulation** of the protocol on **one task** under **one condition** (e.g. one deviation type or one baseline).
+- For example: same claim (same task), but we run it once with **honest** behavior and once with **lie** → that gives **2 episodes** for that task.
+- In Milestone 2 (deviation suite): for each task we run **6 episodes** (honest, no_evidence, lie, withhold, persuasion_only, low_effort). So **500 tasks × 6 = 3,000 episodes**.
+- In Milestone 4 (protocols): for each task we run **P1, P2, P3** and several deviation types → many episodes per task.
+
+### Summary diagram
+
+```
+FEVER dataset (HuggingFace)
+        │
+        ▼  load NUM_SAMPLES rows (e.g. 500)
+   ┌────────────┐
+   │  Samples   │  ← each row = 1 claim + label + evidence
+   └────────────┘
+        │
+        ▼  use first NUM_TASKS as experiment units (e.g. 500)
+   ┌────────────┐
+   │   Tasks    │  ← 1 task = 1 claim (+ label + evidence) we evaluate
+   └────────────┘
+        │
+        ▼  for each task, run protocol with different deviation types / baselines / protocols
+   ┌────────────┐
+   │  Episodes  │  ← 1 episode = 1 run of 1 task with 1 deviation type (or 1 protocol)
+   └────────────┘
+```
+
+### Example with numbers
+
+- **NUM_SAMPLES=500**, **NUM_TASKS=500**: Load 500 FEVER rows, use all 500 as tasks.
+- **Milestone 2**: 500 tasks × 6 deviation types → **3,000 episodes** (each episode = one Sender–Receiver conversation for one claim under one deviation).
+- **Milestone 3**: 500 tasks × 3 methods (P1, Self-Consistency, Self-Refine) → **1,500 episodes**.
+- **Milestone 4**: 500 tasks × 3 protocols × 4 deviation types → **6,000 episodes**.
+
+So when you set **NUM_TASKS=10** for a quick test, you are running the experiment on **10 claims**; each claim may be run multiple times (different episodes) depending on the milestone.
 
 ---
 
@@ -291,6 +345,120 @@ For a full run suitable for paper submission (500 tasks, optional multi-seed):
 3. Use `results/submission_multi_seed_summary.json` for tables (if multi-seed).
 
 Detailed steps, time/cost estimates, and manual multi-seed options: **[SUBMISSION_RUN.md](SUBMISSION_RUN.md)**.
+
+---
+
+## Recommended configuration and metrics for paper
+
+To get **publication-ready** results, use the following setup and report the listed metrics.
+
+### Recommended run configuration
+
+| Parameter | Recommended value | Reason |
+|-----------|-------------------|--------|
+| **NUM_TASKS** | **500** | Enough for statistical significance; standard for FEVER-style experiments. |
+| **NUM_SAMPLES** | **500** | Same as NUM_TASKS (use all loaded samples as tasks). |
+| **SEEDS** | **42,123,456** (or at least 3 seeds) | Report **mean ± std** for robustness; reviewers expect variance. |
+| **SEED** | 42 (if single run) | Reproducibility when not using multi-seed. |
+| **USE_LLM_EVIDENCE_EVAL** | 0 or 1 | 0 = string match only (faster/cheaper); 1 = add LLM evidence scoring. |
+| **OPENAI_MODEL** | gpt-4o-mini | Balance cost vs quality; use gpt-4o if budget allows. |
+
+**Example `.env` for paper:**
+
+```env
+OPENAI_API_KEY=sk-your-key
+NUM_TASKS=500
+NUM_SAMPLES=500
+SEEDS=42,123,456
+SEED=42
+# USE_LLM_EVIDENCE_EVAL=0
+# OPENAI_MODEL=gpt-4o-mini
+```
+
+Then run: `python run_all_milestones.py`. Use **`results/submission_multi_seed_summary.json`** for tables (mean ± std).
+
+---
+
+### Metrics to report in the paper
+
+#### From Milestone 2 (Deviation Suite)
+
+- **IRI** (Incentive Robustness Index): lower is better; IRI = 0 means no deviation is profitable.
+- **Deviation Gain (DG)** per deviation type: **DG &lt; 0** means the protocol penalizes that deviation.
+- **% DG &gt; 0**: fraction of episodes where deviation was beneficial; lower is better.
+
+**Table 1 (example):** Deviation Gain by type (mean ± std over seeds).
+
+| Deviation      | DG (mean ± std) | % DG &gt; 0 | Interpretation   |
+|----------------|------------------|-------------|-------------------|
+| no_evidence    | −0.35 ± 0.02     | 30%         | Effective         |
+| lie            | −0.31 ± 0.03     | 10%         | Effective         |
+| withhold       | −0.13 ± 0.02     | 20%         | Effective         |
+| persuasion_only| −0.50 ± 0.04     | 5%          | Very effective    |
+| low_effort     | −0.08 ± 0.02     | 25%         | Moderate          |
+| **IRI**        | **0.03 ± 0.01**  | —           | Overall robustness |
+
+Data source: `submission_multi_seed_summary.json` → `milestone2.deviation_gains`, `milestone2.mean.iri` / `std.iri`.
+
+---
+
+#### From Milestone 3 (Baseline comparison)
+
+- **Accuracy**: fraction of correct FEVER labels.
+- **Evidence compliance**: fraction of episodes with evidence provided (P1 should be high; baselines typically 0).
+- **Evidence match score**: 0–1, relevance of evidence to ground truth.
+- **Mean payoff**: quality − cost − penalty.
+
+**Table 2 (example):** P1 vs baselines (mean ± std).
+
+| Method              | Accuracy   | Evidence compliance | Evidence match | Mean payoff |
+|---------------------|------------|----------------------|----------------|-------------|
+| P1 Evidence-First   | 0.68 ± 0.02 | **0.92 ± 0.01**     | 0.65 ± 0.03    | 0.12 ± 0.05 |
+| Self-Consistency K=5| **0.71 ± 0.02** | 0.00            | 0.00           | 0.08 ± 0.06 |
+| Self-Refine R=2     | 0.69 ± 0.02 | 0.00                | 0.00           | 0.05 ± 0.05 |
+
+**Claim for paper:** P1 is competitive in accuracy (within a few % of best baseline) while being the only method with high evidence compliance and evidence match.
+
+Data source: `submission_multi_seed_summary.json` → `milestone3.methods`.
+
+---
+
+#### From Milestone 4 (Protocol progression)
+
+- **IRI** per protocol: P1, P2, P3. Expect **IRI(P3) ≤ IRI(P2) ≤ IRI(P1)** (improvement with stricter protocols).
+- **Honest metrics** per protocol: accuracy, evidence_compliance, evidence_match_score, mean_payoff.
+
+**Table 3 (example):** Protocol comparison (mean ± std).
+
+| Protocol   | IRI (mean ± std) | Honest accuracy | Honest evidence compliance |
+|------------|-------------------|------------------|-----------------------------|
+| P1         | 0.15 ± 0.02       | 0.68 ± 0.02      | 0.92 ± 0.01                |
+| P2         | 0.08 ± 0.01       | 0.70 ± 0.02      | 0.94 ± 0.01                |
+| P3         | **0.03 ± 0.01**   | 0.69 ± 0.02      | 0.95 ± 0.01                |
+
+**Claim for paper:** IRI decreases from P1 → P2 → P3, showing that cross-examination and reputation/slashing further reduce the incentive to deviate.
+
+Data source: `submission_multi_seed_summary.json` → `milestone4.protocols`.
+
+---
+
+### What “good” looks like (interpretation)
+
+| Metric / result | Good for paper |
+|-----------------|----------------|
+| **DG &lt; 0** for all (or most) deviation types | Protocol makes deviation unprofitable. |
+| **IRI** small (e.g. &lt; 0.1) | Few or no deviations are beneficial on average. |
+| **% DG &gt; 0** low (e.g. &lt; 25%) | Deviation rarely pays off. |
+| **P1 evidence compliance** &gt; 0.9 | Evidence-First protocol is followed. |
+| **P1 accuracy** within ~5% of best baseline (M3) | No large accuracy trade-off for evidence. |
+| **IRI(P3) &lt; IRI(P2) &lt; IRI(P1)** (M4) | Protocol progression improves incentive robustness. |
+
+---
+
+### Single-seed vs multi-seed
+
+- **Single seed (e.g. SEED=42):** Use `results/milestone2/deviation_suite_results.json`, `baseline_comparison.json`, `protocol_comparison.json` directly. Report metrics without std (or “one run”).
+- **Multi-seed (SEEDS=42,123,456):** Use `results/submission_multi_seed_summary.json`. Report **mean ± std** in tables; stronger for review.
 
 ---
 

@@ -1,0 +1,50 @@
+{
+  "num_tasks": 500,
+  "budget": {
+    "max_tokens_per_task": 2000,
+    "max_calls_per_task": 10
+  },
+  "methods": {
+    "self_consistency_k5": {
+      "accuracy": 0.474,
+      "evidence_compliance": 0.0,
+      "evidence_match_score": 0.0,
+      "mean_payoff": -0.1575,
+      "num_episodes": 500,
+      "std_payoff": 0.624154428006403
+    },
+    "self_refine_r2": {
+      "accuracy": 0.488,
+      "evidence_compliance": 0.0,
+      "evidence_match_score": 0.0,
+      "mean_payoff": -0.14,
+      "num_episodes": 500,
+      "std_payoff": 0.6248199740725324
+    },
+    "protocol_p1": {
+      "accuracy": 0.352,
+      "evidence_compliance": 1.0,
+      "evidence_match_score": 0.6781499999999998,
+      "mean_payoff": 0.27095000000000113,
+      "num_episodes": 500,
+      "std_payoff": 0.5347240853935794
+    }
+  },
+  "rankings": {
+    "accuracy": [
+      "self_refine_r2",
+      "self_consistency_k5",
+      "protocol_p1"
+    ],
+    "evidence_compliance": [
+      "protocol_p1",
+      "self_consistency_k5",
+      "self_refine_r2"
+    ],
+    "payoff": [
+      "protocol_p1",
+      "self_refine_r2",
+      "self_consistency_k5"
+    ]
+  }
+}

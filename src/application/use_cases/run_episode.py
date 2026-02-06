@@ -25,6 +25,7 @@ class RunEpisode:
         verifier: Verifier,
         model_name: str = "gpt-4o",
         api_key: Optional[str] = None,
+        api_key_pool: Optional[Any] = None,
         lambda_cost: float = 0.01,
         mu_penalty: float = 0.5
     ):
@@ -36,6 +37,7 @@ class RunEpisode:
             verifier: Verifier for checking correctness
             model_name: Model name for LLM
             api_key: API key for LLM
+            api_key_pool: APIKeyPool instance for load balancing (overrides api_key)
             lambda_cost: Cost weight in payoff function
             mu_penalty: Penalty weight in payoff function
         """
@@ -43,6 +45,7 @@ class RunEpisode:
         self.verifier = verifier
         self.model_name = model_name
         self.api_key = api_key
+        self.api_key_pool = api_key_pool
         self.lambda_cost = lambda_cost
         self.mu_penalty = mu_penalty
         
@@ -50,7 +53,8 @@ class RunEpisode:
         self.adapter = AutoGenAdapter(
             protocol=protocol,
             model_name=model_name,
-            api_key=api_key
+            api_key=api_key,
+            api_key_pool=api_key_pool
         )
     
     async def execute(

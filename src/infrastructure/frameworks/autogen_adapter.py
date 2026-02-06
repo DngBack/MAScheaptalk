@@ -1,5 +1,5 @@
 """AutoGen framework adapter."""
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 from datetime import datetime
 
 from autogen_agentchat.agents import AssistantAgent
@@ -27,7 +27,8 @@ class AutoGenAdapter:
         self,
         protocol: BaseProtocol,
         model_name: str = "gpt-4o",
-        api_key: Optional[str] = None
+        api_key: Optional[str] = None,
+        api_key_pool: Optional[Any] = None
     ):
         """
         Initialize AutoGen adapter.
@@ -36,10 +37,12 @@ class AutoGenAdapter:
             protocol: Protocol to use for conversation
             model_name: Model name for AutoGen agents
             api_key: OpenAI API key (if None, uses environment variable)
+            api_key_pool: APIKeyPool instance for load balancing (overrides api_key)
         """
         self.protocol = protocol
         self.model_name = model_name
         self.api_key = api_key
+        self.api_key_pool = api_key_pool
     
     async def run_conversation(
         self,
@@ -58,10 +61,15 @@ class AutoGenAdapter:
         Returns:
             Tuple of (transcript, usage_info)
         """
+        # Get API key (from pool if available)
+        api_key = self.api_key
+        if self.api_key_pool:
+            api_key = await self.api_key_pool.get_next_key()
+        
         # Create model client
         model_client = OpenAIChatCompletionClient(
             model=self.model_name,
-            api_key=self.api_key
+            api_key=api_key
         )
         
         # Create agents

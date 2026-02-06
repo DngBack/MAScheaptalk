@@ -18,6 +18,13 @@ from domain.ports.storage import Storage
 from domain.ports.llm_client import LLMClient
 from application.baselines.base_baseline import BaseBaseline
 from application.use_cases.run_episode import RunEpisode
+from application.use_cases.parallel_executor import ParallelExecutor
+
+try:
+    from tqdm.asyncio import tqdm as async_tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
 
 
 class RunBaselineComparison:
@@ -38,7 +45,8 @@ class RunBaselineComparison:
         num_tasks: int = 100,
         max_tokens_per_task: int = 2000,
         max_calls_per_task: int = 10,
-        payoff_config: Optional[PayoffConfig] = None
+        payoff_config: Optional[PayoffConfig] = None,
+        max_concurrent: int = 30
     ):
         """
         Initialize baseline comparison.
@@ -51,6 +59,7 @@ class RunBaselineComparison:
             max_tokens_per_task: Budget limit for tokens
             max_calls_per_task: Budget limit for LLM calls
             payoff_config: Configuration for payoff calculation
+            max_concurrent: Maximum concurrent episodes to run in parallel
         """
         self.dataset_repo = dataset_repo
         self.storage = storage
@@ -58,6 +67,7 @@ class RunBaselineComparison:
         self.num_tasks = num_tasks
         self.max_tokens_per_task = max_tokens_per_task
         self.max_calls_per_task = max_calls_per_task
+        self.max_concurrent = max_concurrent
         self.payoff_calculator = PayoffCalculator(payoff_config or PayoffConfig())
     
     async def execute(
@@ -66,7 +76,7 @@ class RunBaselineComparison:
         run_episode: Optional[RunEpisode] = None
     ) -> Dict[str, Any]:
         """
-        Execute baseline comparison.
+        Execute baseline comparison with parallel execution.
         
         Args:
             baselines: List of baseline methods to compare
@@ -76,12 +86,18 @@ class RunBaselineComparison:
             Comprehensive comparison results
         """
         print("="*80)
-        print("BASELINE COMPARISON")
+        print("BASELINE COMPARISON (PARALLEL)")
         print("="*80)
         print(f"Tasks: {self.num_tasks}")
         print(f"Budget: {self.max_tokens_per_task} tokens, {self.max_calls_per_task} calls per task")
         print(f"Methods: {', '.join([b.get_baseline_id() for b in baselines])}")
+        print(f"Max concurrent: {self.max_concurrent}")
         print("="*80)
+        
+        # Load all tasks
+        print("\nLoading tasks...")
+        all_tasks = list(self.dataset_repo.iter_tasks(limit=self.num_tasks))
+        print(f"Loaded {len(all_tasks)} tasks")
         
         # Store episodes by method
         episodes_by_method: Dict[str, List[Episode]] = {}
@@ -94,70 +110,74 @@ class RunBaselineComparison:
         if run_episode:
             episodes_by_method["protocol_p1"] = []
         
-        # Iterate through tasks
-        task_count = 0
-        for task in self.dataset_repo.iter_tasks(limit=self.num_tasks):
-            task_count += 1
-            print(f"\n[Task {task_count}/{self.num_tasks}] {task.claim[:60]}...")
-            
-            # Run each baseline
+        # Create task tuples for each baseline
+        baseline_tasks = []
+        for task in all_tasks:
             for baseline in baselines:
-                method_id = baseline.get_baseline_id()
-                
-                try:
-                    episode = await baseline.execute(task)
-                    
-                    # Recalculate payoff
-                    payoff, breakdown = self.payoff_calculator.calculate_payoff(
-                        label_correct=episode.verifier_result.label_correct,
-                        evidence_provided=episode.verifier_result.evidence_provided,
-                        evidence_match_score=episode.verifier_result.evidence_match_score,
-                        token_count=0,  # TODO: Track actual tokens
-                        tool_calls=0,
-                        deviation_type="baseline"
-                    )
-                    
-                    episode.payoff = payoff
-                    episode.metrics.update(breakdown)
-                    
-                    # Store
-                    self.storage.save_episode(episode)
-                    episodes_by_method[method_id].append(episode)
-                    
-                    # Print result
-                    symbol = "✓" if episode.verifier_result.label_correct else "✗"
-                    print(f"  {method_id:25s} {symbol} payoff={payoff:+.3f}")
-                
-                except Exception as e:
-                    print(f"  {method_id:25s} ERROR: {e}")
-                    continue
-            
-            # Run protocol if provided
+                baseline_tasks.append((task, baseline))
             if run_episode:
-                try:
-                    episode = await run_episode.execute(task, "honest")
-                    
-                    # Recalculate payoff
-                    payoff, breakdown = self.payoff_calculator.calculate_payoff(
-                        label_correct=episode.verifier_result.label_correct,
-                        evidence_provided=episode.verifier_result.evidence_provided,
-                        evidence_match_score=episode.verifier_result.evidence_match_score,
-                        token_count=0,
-                        tool_calls=0,
-                        deviation_type="honest"
-                    )
-                    
-                    episode.payoff = payoff
-                    episode.metrics.update(breakdown)
-                    
-                    self.storage.save_episode(episode)
-                    episodes_by_method["protocol_p1"].append(episode)
-                    
-                    symbol = "✓" if episode.verifier_result.label_correct else "✗"
-                    print(f"  {'protocol_p1':25s} {symbol} payoff={payoff:+.3f}")
-                
-                except Exception as e:
-                    print(f"  {'protocol_p1':25s} ERROR: {e}")
+                baseline_tasks.append((task, "protocol_p1", run_episode))
+        
+        print(f"Total evaluations: {len(baseline_tasks)}")
+        
+        # Progress tracking
+        completed_count = [0]
+        
+        def progress_callback(completed, total):
+            completed_count[0] = completed
+            if not TQDM_AVAILABLE:
+                if completed % 10 == 0 or completed == total:
+                    print(f"Progress: {completed}/{total} evaluations ({completed/max(1,total)*100:.1f}%)")
+        
+        # Async wrapper for baseline execution
+        async def run_baseline_task(*args):
+            if len(args) == 3:  # Protocol case
+                task, method_id, run_ep = args
+                episode = await run_ep.execute(task, "honest")
+                deviation_type = "honest"
+            else:  # Baseline case
+                task, baseline = args
+                episode = await baseline.execute(task)
+                method_id = baseline.get_baseline_id()
+                deviation_type = "baseline"
+            
+            # Recalculate payoff
+            payoff, breakdown = self.payoff_calculator.calculate_payoff(
+                label_correct=episode.verifier_result.label_correct,
+                evidence_provided=episode.verifier_result.evidence_provided,
+                evidence_match_score=episode.verifier_result.evidence_match_score,
+                token_count=0,
+                tool_calls=0,
+                deviation_type=deviation_type
+            )
+            
+            episode.payoff = payoff
+            episode.metrics.update(breakdown)
+            
+            # Store
+            self.storage.save_episode(episode)
+            
+            return episode, method_id
+        
+        # Execute in parallel
+        print("\nRunning evaluations in parallel...")
+        async with ParallelExecutor(max_concurrent=self.max_concurrent) as executor:
+            results_list, failures = await executor.run_batch(
+                tasks=baseline_tasks,
+                task_func=run_baseline_task,
+                progress_callback=progress_callback
+            )
+            
+            # Organize episodes by method
+            for episode, method_id in results_list:
+                episodes_by_method[method_id].append(episode)
+            
+            # Print failures if any
+            if failures:
+                print(f"\n⚠ {len(failures)} evaluations failed")
+            
+            # Print executor stats
+            executor.print_summary()
         
         # Compute comparison metrics
         results = self._compute_comparison_metrics(episodes_by_method)

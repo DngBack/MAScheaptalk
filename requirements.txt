@@ -30,6 +30,7 @@ rouge-score>=0.1.2                                 # evaluation for QA/spans
 
 # Logging / experiment tracking
 rich>=13.0.0
+tqdm>=4.65.0                                       # Progress bars for monitoring
 tensorboard>=2.13.0                                # experiment tracking (optional)
 
 # (optional) Tool execution if needed

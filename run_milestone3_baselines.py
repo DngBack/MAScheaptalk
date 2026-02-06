@@ -12,6 +12,7 @@ from infrastructure.datasets.hf_fever_repo import HFFEVERRepository
 from infrastructure.verifiers.verifier_factory import create_fever_verifier
 from infrastructure.storage.jsonl_storage import JSONLStorage
 from infrastructure.llm.openai_client import OpenAIClient
+from infrastructure.llm.api_key_pool import APIKeyPool
 from domain.entities.payoff import PayoffConfig
 from application.protocols.p1_evidence_first import P1EvidenceFirstProtocol
 from application.baselines.self_consistency import SelfConsistency
@@ -30,7 +31,8 @@ def _get_submission_config():
             return max(1, int(v.strip()))
         except ValueError:
             return default
-    return _int_env("NUM_TASKS", 500), _int_env("NUM_SAMPLES", 500), _int_env("SEED", 42)
+    return (_int_env("NUM_TASKS", 500), _int_env("NUM_SAMPLES", 500), 
+            _int_env("SEED", 42), _int_env("MAX_CONCURRENT_EPISODES", 30))
 
 
 def main():
@@ -39,10 +41,10 @@ def main():
     # Load environment
     load_dotenv()
     
-    num_tasks, num_samples, seed = _get_submission_config()
+    num_tasks, num_samples, seed, max_concurrent = _get_submission_config()
     
     print("="*80)
-    print("MILESTONE 3: BASELINE COMPARISON")
+    print("MILESTONE 3: BASELINE COMPARISON (PARALLEL)")
     print("="*80)
     print("\nThis will compare P1 protocol against strong baselines:")
     print("  1. Self-Consistency (K=5 samples, voting)")
@@ -51,19 +53,30 @@ def main():
     print(f"  - Tasks: {num_tasks} (set NUM_TASKS in .env for submission)")
     print(f"  - Samples: {num_samples} (set NUM_SAMPLES in .env)")
     print(f"  - Seed: {seed} (set SEED in .env)")
+    print(f"  - Max concurrent: {max_concurrent} (set MAX_CONCURRENT_EPISODES in .env)")
     print("  - Model: gpt-4o-mini (cost-effective)")
     print("  - Budget: 2000 tokens, 10 calls per task")
     print("  - Fair comparison: same LLM, same budget")
     print("="*80)
     
-    # Get API key
-    api_key = os.getenv('OPENAI_API_KEY')
-    if not api_key:
-        print("\n❌ ERROR: OPENAI_API_KEY not set!")
+    # Get API keys (support multiple keys)
+    api_keys_str = os.getenv('OPENAI_API_KEYS', os.getenv('OPENAI_API_KEY', ''))
+    if not api_keys_str:
+        print("\n❌ ERROR: OPENAI_API_KEY or OPENAI_API_KEYS not set!")
         print("Please set it:")
         print("  export OPENAI_API_KEY=your-key")
-        print("  or add to .env file")
+        print("  or for multiple keys: export OPENAI_API_KEYS=key1,key2,key3")
         return 1
+    
+    # Create API key pool
+    api_key_pool = APIKeyPool.from_env_string(
+        api_keys_str,
+        rate_limit_rpm=int(os.getenv('RATE_LIMIT_RPM', '500'))
+    )
+    print(f"\n✓ Using {len(api_key_pool)} API key(s) for load balancing")
+    
+    # For backwards compatibility
+    api_key = api_keys_str.split(',')[0].strip()
     
     # Initialize components
     print("\n[1/5] Initializing dataset...")
@@ -110,6 +123,7 @@ def main():
         verifier=verifier,
         model_name="gpt-4o-mini",
         api_key=api_key,
+        api_key_pool=api_key_pool,
         lambda_cost=0.01,
         mu_penalty=0.5
     )
@@ -125,7 +139,8 @@ def main():
         num_tasks=num_tasks,
         max_tokens_per_task=2000,
         max_calls_per_task=10,
-        payoff_config=payoff_config
+        payoff_config=payoff_config,
+        max_concurrent=max_concurrent
     )
     
     print("\n" + "="*80)
@@ -146,6 +161,10 @@ def main():
         print(f"\nResults saved to:")
         print(f"  - Episodes: results/milestone3/episodes.jsonl")
         print(f"  - Summary: {output_path}")
+        
+        # Print API key pool stats
+        if len(api_key_pool) > 1:
+            api_key_pool.print_stats()
         
         # Print key findings
         print("\n📊 KEY FINDINGS:")

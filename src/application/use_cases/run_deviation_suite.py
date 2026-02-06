@@ -16,7 +16,15 @@ from domain.entities.payoff import PayoffCalculator, PayoffConfig
 from domain.ports.dataset_repo import DatasetRepository
 from domain.ports.storage import Storage
 from application.use_cases.run_episode import RunEpisode
+from application.use_cases.parallel_executor import ParallelExecutor
 from application.protocols.deviation_policies import DeviationPolicy
+from infrastructure.storage.checkpoint_manager import CheckpointManager
+
+try:
+    from tqdm.asyncio import tqdm as async_tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
 
 
 class RunDeviationSuite:
@@ -34,7 +42,10 @@ class RunDeviationSuite:
         storage: Storage,
         num_tasks: int = 100,
         deviation_types: Optional[List[str]] = None,
-        payoff_config: Optional[PayoffConfig] = None
+        payoff_config: Optional[PayoffConfig] = None,
+        max_concurrent: int = 30,
+        batch_size: int = 100,
+        checkpoint_manager: Optional[CheckpointManager] = None
     ):
         """
         Initialize deviation suite.
@@ -46,11 +57,17 @@ class RunDeviationSuite:
             num_tasks: Number of tasks to test
             deviation_types: List of deviation types (defaults to all)
             payoff_config: Configuration for payoff calculation
+            max_concurrent: Maximum concurrent episodes to run in parallel
+            batch_size: Number of episodes per batch (for checkpointing)
+            checkpoint_manager: Optional checkpoint manager for resume capability
         """
         self.run_episode = run_episode
         self.dataset_repo = dataset_repo
         self.storage = storage
         self.num_tasks = num_tasks
+        self.max_concurrent = max_concurrent
+        self.batch_size = batch_size
+        self.checkpoint_manager = checkpoint_manager
         
         # Default to all deviation types
         if deviation_types is None:
@@ -62,7 +79,7 @@ class RunDeviationSuite:
     
     async def execute(self) -> Dict[str, Any]:
         """
-        Execute the deviation suite.
+        Execute the deviation suite with parallel execution.
         
         For each task:
         1. Run with honest behavior
@@ -73,61 +90,120 @@ class RunDeviationSuite:
             Dictionary with comprehensive deviation analysis
         """
         print("="*70)
-        print("DEVIATION SUITE ANALYSIS")
+        print("DEVIATION SUITE ANALYSIS (PARALLEL)")
         print("="*70)
         print(f"Tasks: {self.num_tasks}")
         print(f"Deviation types: {', '.join(self.deviation_types)}")
+        print(f"Max concurrent: {self.max_concurrent}")
         print(f"Payoff config: λ={self.payoff_calculator.config.lambda_cost}, "
               f"μ={self.payoff_calculator.config.mu_penalty}")
         print("="*70)
+        
+        # Load all tasks upfront
+        print("\nLoading tasks...")
+        all_tasks = list(self.dataset_repo.iter_tasks(limit=self.num_tasks))
+        print(f"Loaded {len(all_tasks)} tasks")
+        
+        # Create all episode task tuples (task, deviation_type)
+        episode_tasks = []
+        for task in all_tasks:
+            for deviation_type in self.deviation_types:
+                episode_id = f"ep_{task.task_id}_{deviation_type}"
+                
+                # Skip if already completed (checkpoint resume)
+                if self.checkpoint_manager and self.checkpoint_manager.is_completed(episode_id):
+                    continue
+                
+                episode_tasks.append((task, deviation_type))
+        
+        total_episodes = len(all_tasks) * len(self.deviation_types)
+        print(f"Total episodes to run: {len(episode_tasks)} (skipped {total_episodes - len(episode_tasks)} completed)")
         
         # Store episodes by deviation type
         episodes_by_type: Dict[str, List[Episode]] = {
             dt: [] for dt in self.deviation_types
         }
         
-        # Iterate through tasks
-        task_count = 0
-        for task in self.dataset_repo.iter_tasks(limit=self.num_tasks):
-            task_count += 1
-            print(f"\n[Task {task_count}/{self.num_tasks}] {task.task_id}: {task.claim[:60]}...")
+        # Progress tracking
+        completed_count = [0]  # Use list for mutable reference in closure
+        
+        def progress_callback(completed, total):
+            completed_count[0] = completed
+            # Always print progress (not just when tqdm unavailable)
+            if completed % 10 == 0 or completed == total or completed == 1:
+                print(f"Progress: {completed}/{total} episodes ({completed/max(1,total)*100:.1f}%)", flush=True)
+        
+        def checkpoint_callback(recent_episodes):
+            """Save checkpoint after each batch."""
+            if self.checkpoint_manager:
+                episode_ids = [ep.episode_id for ep in recent_episodes]
+                self.checkpoint_manager.save(
+                    episode_ids=episode_ids,
+                    total_episodes=total_episodes,
+                    metadata={"deviation_types": self.deviation_types}
+                )
+        
+        # Async wrapper for run_episode that handles storage and payoff
+        async def run_and_process_episode(task: Task, deviation_type: str) -> Episode:
+            episode = await self.run_episode.execute(task, deviation_type)
             
-            # Run episode for each deviation type
-            for deviation_type in self.deviation_types:
-                try:
-                    episode = await self.run_episode.execute(task, deviation_type)
-                    
-                    # Recalculate payoff using our payoff calculator
-                    payoff, breakdown = self.payoff_calculator.calculate_payoff(
-                        label_correct=episode.verifier_result.label_correct,
-                        evidence_provided=episode.verifier_result.evidence_provided,
-                        evidence_match_score=episode.verifier_result.evidence_match_score,
-                        token_count=0,  # TODO: Track tokens
-                        tool_calls=0,   # TODO: Track tool calls
-                        deviation_type=deviation_type
-                    )
-                    
-                    # Update episode with new payoff
-                    episode.payoff = payoff
-                    episode.metrics.update(breakdown)
-                    
-                    # Store episode
-                    self.storage.save_episode(episode)
-                    episodes_by_type[deviation_type].append(episode)
-                    
-                    # Print concise result
-                    symbol = "✓" if episode.verifier_result.label_correct else "✗"
-                    print(f"  {deviation_type:15s} {symbol} payoff={payoff:+.3f}")
-                
-                except Exception as e:
-                    print(f"  {deviation_type:15s} ERROR: {e}")
-                    continue
+            # Recalculate payoff using our payoff calculator
+            payoff, breakdown = self.payoff_calculator.calculate_payoff(
+                label_correct=episode.verifier_result.label_correct,
+                evidence_provided=episode.verifier_result.evidence_provided,
+                evidence_match_score=episode.verifier_result.evidence_match_score,
+                token_count=0,
+                tool_calls=0,
+                deviation_type=deviation_type
+            )
+            
+            # Update episode with new payoff
+            episode.payoff = payoff
+            episode.metrics.update(breakdown)
+            
+            # Store episode
+            self.storage.save_episode(episode)
+            
+            return episode
+        
+        # Execute in parallel
+        print("\nRunning episodes in parallel...", flush=True)
+        print(f"Starting {len(episode_tasks)} episode executions with {self.max_concurrent} max concurrent...", flush=True)
+        async with ParallelExecutor(
+            max_concurrent=self.max_concurrent,
+            batch_size=self.batch_size
+        ) as executor:
+            episodes, failures = await executor.run_batch(
+                tasks=episode_tasks,
+                task_func=run_and_process_episode,
+                progress_callback=progress_callback,
+                checkpoint_callback=checkpoint_callback
+            )
+            
+            # Organize episodes by deviation type
+            for episode in episodes:
+                episodes_by_type[episode.deviation_type].append(episode)
+            
+            # Print failures if any
+            if failures:
+                print(f"\n⚠ {len(failures)} episodes failed:")
+                for (task, deviation_type), error in failures[:5]:  # Show first 5
+                    print(f"  - Task {task.task_id}, {deviation_type}: {error}")
+                if len(failures) > 5:
+                    print(f"  ... and {len(failures) - 5} more")
+            
+            # Print executor stats
+            executor.print_summary()
         
         # Compute comprehensive metrics
         results = self._compute_comprehensive_metrics(episodes_by_type)
         
         # Print detailed analysis
         self._print_deviation_analysis(results)
+        
+        # Mark checkpoint as complete
+        if self.checkpoint_manager:
+            self.checkpoint_manager.complete()
         
         return results
     

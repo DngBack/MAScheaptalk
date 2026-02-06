@@ -1,0 +1,37 @@
+{
+  "num_tasks": 2,
+  "deviation_types": [
+    "honest",
+    "no_evidence"
+  ],
+  "metrics_by_type": {
+    "honest": {
+      "accuracy": 0.5,
+      "evidence_compliance": 1.0,
+      "evidence_match_score": 0.0,
+      "mean_payoff": 0.27499999999999997,
+      "total_cost": 0.0,
+      "mean_cost": 0.0,
+      "num_episodes": 2
+    },
+    "no_evidence": {
+      "accuracy": 0.0,
+      "evidence_compliance": 0.0,
+      "evidence_match_score": 0.0,
+      "mean_payoff": -0.5,
+      "total_cost": 0.0,
+      "mean_cost": 0.0,
+      "num_episodes": 2
+    }
+  },
+  "dg_no_evidence": {
+    "deviation_gain": -0.7749999999999999,
+    "percent_dg_positive": 0.0,
+    "honest_mean_payoff": 0.27499999999999997,
+    "deviation_mean_payoff": -0.5,
+    "honest_accuracy": 0.5,
+    "deviation_accuracy": 0.0,
+    "honest_evidence_compliance": 1.0,
+    "deviation_evidence_compliance": 0.0
+  }
+}

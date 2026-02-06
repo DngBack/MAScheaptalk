@@ -11,6 +11,8 @@ sys.path.insert(0, str(src_path))
 from infrastructure.datasets.hf_fever_repo import HFFEVERRepository
 from infrastructure.verifiers.verifier_factory import create_fever_verifier
 from infrastructure.storage.jsonl_storage import JSONLStorage
+from infrastructure.llm.api_key_pool import APIKeyPool
+from infrastructure.storage.checkpoint_manager import CheckpointManager
 from domain.entities.payoff import PayoffConfig
 from application.protocols.p1_evidence_first import P1EvidenceFirstProtocol
 from application.use_cases.run_episode import RunEpisode
@@ -30,7 +32,9 @@ def _get_submission_config():
     num_tasks = _int_env("NUM_TASKS", 500)
     num_samples = _int_env("NUM_SAMPLES", 500)
     seed = _int_env("SEED", 42)
-    return num_tasks, num_samples, seed
+    max_concurrent = _int_env("MAX_CONCURRENT_EPISODES", 30)
+    batch_size = _int_env("BATCH_SIZE", 100)
+    return num_tasks, num_samples, seed, max_concurrent, batch_size
 
 
 def main():
@@ -39,10 +43,10 @@ def main():
     # Load environment
     load_dotenv()
     
-    num_tasks, num_samples, seed = _get_submission_config()
+    num_tasks, num_samples, seed, max_concurrent, batch_size = _get_submission_config()
     
     print("="*80)
-    print("MILESTONE 2: DEVIATION SUITE")
+    print("MILESTONE 2: DEVIATION SUITE (PARALLEL)")
     print("="*80)
     print("\nThis will test all deviation types and compute Deviation Gain (DG)")
     print("Deviation types: honest, no_evidence, lie, withhold, persuasion_only, low_effort")
@@ -50,19 +54,33 @@ def main():
     print(f"  - Tasks: {num_tasks} (set NUM_TASKS in .env for submission)")
     print(f"  - Samples: {num_samples} (set NUM_SAMPLES in .env)")
     print(f"  - Seed: {seed} (set SEED in .env for reproducibility)")
+    print(f"  - Max concurrent: {max_concurrent} (set MAX_CONCURRENT_EPISODES in .env)")
+    print(f"  - Batch size: {batch_size} (set BATCH_SIZE in .env)")
     print("  - Model: gpt-4o-mini (cost-effective)")
     print("  - Protocol: P1 Evidence-First")
     print("  - Payoff: λ=0.01, μ=0.5")
     print("="*80)
     
-    # Get API key
-    api_key = os.getenv('OPENAI_API_KEY')
-    if not api_key:
-        print("\n❌ ERROR: OPENAI_API_KEY not set!")
+    # Get API keys (support multiple keys)
+    api_keys_str = os.getenv('OPENAI_API_KEYS', os.getenv('OPENAI_API_KEY', ''))
+    if not api_keys_str:
+        print("\n❌ ERROR: OPENAI_API_KEY or OPENAI_API_KEYS not set!")
         print("Please set it:")
         print("  export OPENAI_API_KEY=your-key")
+        print("  or for multiple keys: export OPENAI_API_KEYS=key1,key2,key3")
         print("  or add to .env file")
         return 1
+    
+    # Create API key pool
+    api_key_pool = APIKeyPool.from_env_string(
+        api_keys_str,
+        rate_limit_rpm=int(os.getenv('RATE_LIMIT_RPM', '500'))
+    )
+    print(f"\n✓ Using {len(api_key_pool)} API key(s) for load balancing")
+    print(f"  Total capacity: {api_key_pool.rate_limit_rpm * len(api_key_pool)} RPM")
+    
+    # For backwards compatibility, get single key
+    api_key = api_keys_str.split(',')[0].strip()
     
     # Initialize components
     print("\n[1/5] Initializing dataset...")
@@ -92,12 +110,26 @@ def main():
         mu_penalty=0.5
     )
     
-    # Run episode
+    # Checkpoint manager
+    checkpoint_manager = CheckpointManager(
+        checkpoint_dir="results/checkpoints",
+        milestone="milestone2",
+        seed=seed,
+        auto_cleanup=True
+    )
+    
+    # Resume from checkpoint if exists
+    checkpoint_manager.load()
+    if checkpoint_manager.completed_episodes:
+        checkpoint_manager.print_status()
+    
+    # Run episode with API key pool
     run_episode = RunEpisode(
         protocol=protocol,
         verifier=verifier,
         model_name="gpt-4o-mini",  # Cost-effective OpenAI model
         api_key=api_key,
+        api_key_pool=api_key_pool,
         lambda_cost=0.01,
         mu_penalty=0.5
     )
@@ -109,7 +141,10 @@ def main():
         storage=storage,
         num_tasks=num_tasks,
         deviation_types=None,  # Use all
-        payoff_config=payoff_config
+        payoff_config=payoff_config,
+        max_concurrent=max_concurrent,
+        batch_size=batch_size,
+        checkpoint_manager=checkpoint_manager
     )
     
     print("\n" + "="*80)
@@ -130,6 +165,10 @@ def main():
         print(f"\nResults saved to:")
         print(f"  - Episodes: results/milestone2/episodes.jsonl")
         print(f"  - Summary: {output_path}")
+        
+        # Print API key pool stats
+        if len(api_key_pool) > 1:
+            api_key_pool.print_stats()
         
         # Print key findings
         print("\n📊 KEY METRICS:")
